@@ -283,10 +283,12 @@ struct ClaudeOAuthDelegatedRefreshRecoveryTests {
     }
 
     @Test
-    func `delegated refresh attempted succeeded background only on user action does not recover from keychain`()
+    func `delegated refresh attempted succeeded background only on user action recovers from keychain without prompt`()
         async throws
     {
         let delegatedCounter = AsyncCounter()
+        let usageResponse = try Self.makeOAuthUsageResponse()
+        let tokenCapture = TokenCapture()
         let service = "com.steipete.codexbar.cache.tests.\(UUID().uuidString)"
 
         try await KeychainCacheStore.withServiceOverrideForTesting(service) {
@@ -306,7 +308,7 @@ struct ClaudeOAuthDelegatedRefreshRecoveryTests {
                         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
                         let fileURL = tempDir.appendingPathComponent("credentials.json")
 
-                        await ClaudeOAuthCredentialsStore.withCredentialsURLOverrideForTesting(fileURL) {
+                        try await ClaudeOAuthCredentialsStore.withCredentialsURLOverrideForTesting(fileURL) {
                             ClaudeOAuthCredentialsStore.invalidateCache()
                             let expiredData = self.makeCredentialsData(
                                 accessToken: "expired-token",
@@ -340,6 +342,12 @@ struct ClaudeOAuthDelegatedRefreshRecoveryTests {
                                 oauthKeychainPromptCooldownEnabled: false,
                                 allowBackgroundDelegatedRefresh: true)
 
+                            let fetchOverride: (@Sendable (String, Bool) async throws -> OAuthUsageResponse)? =
+                                { token, _ in
+                                    await tokenCapture.set(token)
+                                    return usageResponse
+                                }
+
                             let delegatedOverride: (@Sendable (
                                 Date,
                                 TimeInterval,
@@ -351,33 +359,27 @@ struct ClaudeOAuthDelegatedRefreshRecoveryTests {
                                     return .attemptedSucceeded
                                 }
 
-                            do {
-                                _ = try await ClaudeOAuthKeychainPromptPreference.withTaskOverrideForTesting(
-                                    .onlyOnUserAction)
-                                {
-                                    try await ProviderInteractionContext.$current.withValue(.background) {
-                                        try await ClaudeOAuthCredentialsStore
-                                            .withMutableClaudeKeychainOverrideStoreForTesting(keychainOverrideStore) {
-                                                try await ClaudeUsageFetcher.$delegatedRefreshAttemptOverride
-                                                    .withValue(delegatedOverride) {
-                                                        try await fetcher.loadLatestUsage(model: "sonnet")
-                                                    }
-                                            }
-                                    }
+                            let snapshot = try await ClaudeOAuthKeychainPromptPreference.withTaskOverrideForTesting(
+                                .onlyOnUserAction)
+                            {
+                                try await ProviderInteractionContext.$current.withValue(.background) {
+                                    try await ClaudeOAuthCredentialsStore
+                                        .withMutableClaudeKeychainOverrideStoreForTesting(keychainOverrideStore) {
+                                            try await ClaudeUsageFetcher.$fetchOAuthUsageOverride
+                                                .withValue(fetchOverride) {
+                                                    try await ClaudeUsageFetcher.$delegatedRefreshAttemptOverride
+                                                        .withValue(delegatedOverride) {
+                                                            try await fetcher.loadLatestUsage(model: "sonnet")
+                                                        }
+                                                }
+                                        }
                                 }
-                                Issue.record(
-                                    "Expected OAuth fetch failure: background keychain recovery should stay blocked")
-                            } catch let error as ClaudeUsageError {
-                                guard case let .oauthFailed(message) = error else {
-                                    Issue.record("Expected ClaudeUsageError.oauthFailed, got \(error)")
-                                    return
-                                }
-                                #expect(message.contains("still unavailable after delegated Claude CLI refresh"))
-                            } catch {
-                                Issue.record("Expected ClaudeUsageError, got \(error)")
                             }
 
                             #expect(await delegatedCounter.current() == 1)
+                            #expect(await tokenCapture.get() == "fresh-token")
+                            #expect(snapshot.primary.usedPercent == 7)
+                            #expect(snapshot.secondary?.usedPercent == 21)
                         }
                     }
                 }

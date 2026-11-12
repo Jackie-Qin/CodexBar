@@ -399,7 +399,9 @@ public struct ClaudeUsageFetcher: ClaudeUsageFetching, Sendable {
                 _ = ClaudeOAuthCredentialsStore.invalidateCacheIfCredentialsFileChanged()
 
                 let didSyncSilently = delegatedOutcome == .attemptedSucceeded
-                    && ClaudeOAuthCredentialsStore.syncFromClaudeKeychainWithoutPrompt(now: Date())
+                    && ClaudeOAuthCredentialsStore.syncFromClaudeKeychainWithoutPrompt(
+                        now: Date(),
+                        allowBackgroundFallbackAfterDelegatedRefresh: true)
 
                 let promptPolicy = ClaudeUsageFetcher.currentClaudeOAuthInteractivePromptPolicy()
                 ClaudeUsageFetcher.logDeferredBackgroundDelegatedRecoveryIfNeeded(

@@ -864,11 +864,15 @@ public enum ClaudeOAuthCredentialsStore {
         }
 
         @discardableResult
-        func syncFromClaudeKeychainWithoutPrompt(now: Date = Date()) -> Bool {
+        func syncFromClaudeKeychainWithoutPrompt(
+            now: Date = Date(),
+            allowBackgroundFallbackAfterDelegatedRefresh: Bool = false) -> Bool
+        {
             self.context.run {
                 #if os(macOS)
                 let mode = ClaudeOAuthKeychainPromptPreference.current()
-                guard ClaudeOAuthCredentialsStore.shouldAllowClaudeCodeKeychainAccess(mode: mode) else { return false }
+                guard ClaudeOAuthCredentialsStore.keychainAccessAllowed else { return false }
+                guard mode != .never else { return false }
 
                 if let data = ClaudeOAuthCredentialsStore.loadFromClaudeKeychainViaSecurityCLIIfEnabled(
                     interaction: ProviderInteractionContext.current),
@@ -886,91 +890,96 @@ public enum ClaudeOAuthCredentialsStore {
                     }
                 }
 
-                let fallbackPromptMode = ClaudeOAuthKeychainPromptPreference.securityFrameworkFallbackMode()
-                guard ClaudeOAuthCredentialsStore.shouldAllowClaudeCodeKeychainAccess(mode: fallbackPromptMode) else {
-                    return false
-                }
+                let runFallbackSync = {
+                    let fallbackPromptMode = ClaudeOAuthKeychainPromptPreference.securityFrameworkFallbackMode()
+                    guard ClaudeOAuthCredentialsStore.shouldAllowClaudeCodeKeychainAccess(mode: fallbackPromptMode)
+                    else {
+                        return false
+                    }
 
-                if ProviderInteractionContext.current == .background,
-                   !ClaudeOAuthKeychainAccessGate.shouldAllowPrompt(now: now)
-                {
-                    return false
-                }
-
-                #if DEBUG
-                let override = ClaudeOAuthCredentialsStore.taskClaudeKeychainOverrideStore?.data
-                    ?? ClaudeOAuthCredentialsStore.taskClaudeKeychainDataOverride
-                    ?? ClaudeOAuthCredentialsStore.claudeKeychainDataOverride
-                if let override,
-                   !override.isEmpty,
-                   let creds = try? ClaudeOAuthCredentials.parse(data: override),
-                   !creds.isExpired
-                {
-                    ClaudeOAuthCredentialsStore.saveClaudeKeychainFingerprint(
-                        ClaudeOAuthCredentialsStore.currentClaudeKeychainFingerprintWithoutPrompt())
-                    ClaudeOAuthCredentialsStore.writeMemoryCache(
-                        record: ClaudeOAuthCredentialRecord(
-                            credentials: creds,
-                            owner: .claudeCLI,
-                            source: .memoryCache),
-                        timestamp: now)
-                    ClaudeOAuthCredentialsStore.saveToCacheKeychain(override, owner: .claudeCLI)
-                    return true
-                }
-                #endif
-
-                if ClaudeOAuthCredentialsStore.shouldShowClaudeKeychainPreAlert() {
-                    return false
-                }
-
-                if let candidate = ClaudeOAuthCredentialsStore.claudeKeychainCandidatesWithoutPrompt(
-                    promptMode: fallbackPromptMode).first,
-                    let data = try? ClaudeOAuthCredentialsStore.loadClaudeKeychainData(
-                        candidate: candidate,
-                        allowKeychainPrompt: false),
-                    !data.isEmpty
-                {
-                    let fingerprint = ClaudeKeychainFingerprint(
-                        modifiedAt: candidate.modifiedAt.map { Int($0.timeIntervalSince1970) },
-                        createdAt: candidate.createdAt.map { Int($0.timeIntervalSince1970) },
-                        persistentRefHash: ClaudeOAuthCredentialsStore.sha256Prefix(candidate.persistentRef))
-
-                    if let creds = try? ClaudeOAuthCredentials.parse(data: data), !creds.isExpired {
-                        ClaudeOAuthCredentialsStore.saveClaudeKeychainFingerprint(fingerprint)
+                    #if DEBUG
+                    let override = ClaudeOAuthCredentialsStore.taskClaudeKeychainOverrideStore?.data
+                        ?? ClaudeOAuthCredentialsStore.taskClaudeKeychainDataOverride
+                        ?? ClaudeOAuthCredentialsStore.claudeKeychainDataOverride
+                    if let override,
+                       !override.isEmpty,
+                       let creds = try? ClaudeOAuthCredentials.parse(data: override),
+                       !creds.isExpired
+                    {
+                        ClaudeOAuthCredentialsStore.saveClaudeKeychainFingerprint(
+                            ClaudeOAuthCredentialsStore.currentClaudeKeychainFingerprintWithoutPrompt())
                         ClaudeOAuthCredentialsStore.writeMemoryCache(
                             record: ClaudeOAuthCredentialRecord(
                                 credentials: creds,
                                 owner: .claudeCLI,
                                 source: .memoryCache),
                             timestamp: now)
-                        ClaudeOAuthCredentialsStore.saveToCacheKeychain(data, owner: .claudeCLI)
+                        ClaudeOAuthCredentialsStore.saveToCacheKeychain(override, owner: .claudeCLI)
+                        return true
+                    }
+                    #endif
+
+                    if let candidate = ClaudeOAuthCredentialsStore.claudeKeychainCandidatesWithoutPrompt(
+                        promptMode: fallbackPromptMode).first,
+                        let data = try? ClaudeOAuthCredentialsStore.loadClaudeKeychainData(
+                            candidate: candidate,
+                            allowKeychainPrompt: false),
+                        !data.isEmpty
+                    {
+                        let fingerprint = ClaudeKeychainFingerprint(
+                            modifiedAt: candidate.modifiedAt.map { Int($0.timeIntervalSince1970) },
+                            createdAt: candidate.createdAt.map { Int($0.timeIntervalSince1970) },
+                            persistentRefHash: ClaudeOAuthCredentialsStore.sha256Prefix(candidate.persistentRef))
+
+                        if let creds = try? ClaudeOAuthCredentials.parse(data: data), !creds.isExpired {
+                            ClaudeOAuthCredentialsStore.saveClaudeKeychainFingerprint(fingerprint)
+                            ClaudeOAuthCredentialsStore.writeMemoryCache(
+                                record: ClaudeOAuthCredentialRecord(
+                                    credentials: creds,
+                                    owner: .claudeCLI,
+                                    source: .memoryCache),
+                                timestamp: now)
+                            ClaudeOAuthCredentialsStore.saveToCacheKeychain(data, owner: .claudeCLI)
+                            return true
+                        }
+
+                        ClaudeOAuthCredentialsStore.saveClaudeKeychainFingerprint(fingerprint)
+                    }
+
+                    let legacyData = try? ClaudeOAuthCredentialsStore.loadClaudeKeychainLegacyData(
+                        allowKeychainPrompt: false,
+                        promptMode: fallbackPromptMode)
+                    if let legacyData,
+                       !legacyData.isEmpty,
+                       let creds = try? ClaudeOAuthCredentials.parse(data: legacyData),
+                       !creds.isExpired
+                    {
+                        ClaudeOAuthCredentialsStore.saveClaudeKeychainFingerprint(
+                            ClaudeOAuthCredentialsStore.currentClaudeKeychainFingerprintWithoutPrompt())
+                        ClaudeOAuthCredentialsStore.writeMemoryCache(
+                            record: ClaudeOAuthCredentialRecord(
+                                credentials: creds,
+                                owner: .claudeCLI,
+                                source: .memoryCache),
+                            timestamp: now)
+                        ClaudeOAuthCredentialsStore.saveToCacheKeychain(legacyData, owner: .claudeCLI)
                         return true
                     }
 
-                    ClaudeOAuthCredentialsStore.saveClaudeKeychainFingerprint(fingerprint)
+                    return false
                 }
 
-                let legacyData = try? ClaudeOAuthCredentialsStore.loadClaudeKeychainLegacyData(
-                    allowKeychainPrompt: false,
-                    promptMode: fallbackPromptMode)
-                if let legacyData,
-                   !legacyData.isEmpty,
-                   let creds = try? ClaudeOAuthCredentials.parse(data: legacyData),
-                   !creds.isExpired
+                // Delegated Claude CLI refresh already represents an external user-authorized token refresh.
+                // The follow-up sync remains no-UI (`allowKeychainPrompt: false`) but must bypass the background
+                // prompt gate, otherwise background refreshes can observe that Claude refreshed and still keep
+                // showing a stale "run claude login" error.
+                if allowBackgroundFallbackAfterDelegatedRefresh,
+                   ProviderInteractionContext.current == .background
                 {
-                    ClaudeOAuthCredentialsStore.saveClaudeKeychainFingerprint(
-                        ClaudeOAuthCredentialsStore.currentClaudeKeychainFingerprintWithoutPrompt())
-                    ClaudeOAuthCredentialsStore.writeMemoryCache(
-                        record: ClaudeOAuthCredentialRecord(
-                            credentials: creds,
-                            owner: .claudeCLI,
-                            source: .memoryCache),
-                        timestamp: now)
-                    ClaudeOAuthCredentialsStore.saveToCacheKeychain(legacyData, owner: .claudeCLI)
-                    return true
+                    return ProviderInteractionContext.$current.withValue(.userInitiated, operation: runFallbackSync)
                 }
 
-                return false
+                return runFallbackSync()
                 #else
                 _ = now
                 return false
@@ -2295,8 +2304,13 @@ extension ClaudeOAuthCredentialsStore {
     /// After delegated Claude CLI refresh, re-load the Claude keychain entry without prompting and sync it into
     /// CodexBar's caches. This is used to avoid triggering a second OS keychain dialog during the OAuth retry.
     @discardableResult
-    static func syncFromClaudeKeychainWithoutPrompt(now: Date = Date()) -> Bool {
-        Recovery(context: self.currentCollaboratorContext()).syncFromClaudeKeychainWithoutPrompt(now: now)
+    static func syncFromClaudeKeychainWithoutPrompt(
+        now: Date = Date(),
+        allowBackgroundFallbackAfterDelegatedRefresh: Bool = false) -> Bool
+    {
+        Recovery(context: self.currentCollaboratorContext()).syncFromClaudeKeychainWithoutPrompt(
+            now: now,
+            allowBackgroundFallbackAfterDelegatedRefresh: allowBackgroundFallbackAfterDelegatedRefresh)
     }
 
     private static func shouldShowClaudeKeychainPreAlert() -> Bool {
